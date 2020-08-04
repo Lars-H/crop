@@ -7,11 +7,12 @@ from nlde.util.ldfparser import LDFParser
 import httplib
 import urllib
 import logging
-from nlde.util.logging_utils import RequestCountHandler
+from re import findall
 
+triples_regex = r"void:triples\D*(\d+)"
 
-user_agent = "nLDE 0.2"
-accept = "application/json"
+user_agent = "crop 0.1"
+accept = "application/json,application/ld+json"
 import datetime
 
 def get_metadata_ldf(server, query):
@@ -43,11 +44,10 @@ def get_metadata_ldf(server, query):
     # Successfully contacted the server.
     if response.status == httplib.OK:
         res = response.read()
-        pos1 = res.find('"void:triples"')
-        pos2 = res[pos1:].find(",")
-        aux = res[pos1 + len('"void:triples"'):pos1 + pos2]
-        aux = aux.strip(" ").strip(":").strip(" ")
-        total = int(aux)
+        matches = findall(triples_regex, res)
+        if len(matches) == 1:
+            total = int(matches[0])
+            # Return estimated number of triples in fragment.
 
     else:
         # TODO: Inform the user that the server could not be contacted.
@@ -150,11 +150,11 @@ def contact_ldf_server(server, query, queue):
             page = page + 1
             if page == 1:
                 # Get total solutions in fragment.
-                pos1 = res.find('"void:triples"')
-                pos2 = res[pos1:].find(",")
-                aux = res[pos1 + len('"void:triples"'):pos1 + pos2]
-                aux = aux.strip(" ").strip(":").strip(" ")
-                total = int(aux)
+                matches = findall(triples_regex, res)
+                if len(matches) == 1:
+                    total = int(matches[0])
+                else:
+                    total = 0
 
             # Get solution mappings from fragment.
             if total > 0:
