@@ -84,6 +84,9 @@ optional arguments:
                         (Optional)
 ```
 
+## Supplemental Material
+
+The supplemental material including the experimental results and analyis are provided in the [CROP Analysis repository](https://github.com/Lars-H/crop_analysis). 
 
 ## How to Cite
 ```
@@ -91,3 +94,9 @@ Lars Heling, Maribel Acosta.
 "Cost- and Robustness-based Query Optimization for Triple Pattern Fragment Clients" 
 International Semantic Web Conference 2020.
 ```
+
+## License
+
+This project is licensed under the MIT License.
+
+
