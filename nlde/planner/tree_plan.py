@@ -1,19 +1,25 @@
 from multiprocessing import Process
 from nlde.operators.xproject import Xproject
 from nlde.operators.xdistinct import Xdistinct
+from nlde.operators.xunion import Xunion
+from nlde.operators.xlimit import Xlimit
+from nlde.operators.xgoptional import Xgoptional
+from nlde.operators.xnoptional import Xnoptional
+from nlde.operators.polyfjoin import Poly_Fjoin
+from nlde.operators.independent_operator import IndependentOperator
 
 class TreePlan(object):
     """
     Represents a plan to be executed by the engine.
 
-    It is composed by a left node, a right node, and an operators node.
-    The left and right nodes can be leaves to contact sources, or subtrees.
+    It is composed by a left_plan node, a right_plan node, and an operators node.
+    The left_plan and right_plan nodes can be leaves to contact sources, or subtrees.
     The operators node is a physical operators, provided by the engine.
 
     The execute() method evaluates the plan.
     It creates a process for every node of the plan.
-    The left node is always evaluated.
-    If the right node is an independent operators or a subtree, it is evaluated.
+    The left_plan node is always evaluated.
+    If the right_plan node is an independent operators or a subtree, it is evaluated.
     """
 
     def __init__(self, operator, variables, join_vars, sources, left, right, height=0, res=0):
@@ -30,27 +36,20 @@ class TreePlan(object):
         self.cost = None
         self.cardinality = None
 
-
-
-    def to_dict(self):
-        return {
-            "type" : "TreePlan",
-            "operator" : self.operator.to_dict(),
-            "variables" : list(self.vars),
-            "join_vars" : list(self.join_vars),
-            "sources" : { key : list(val) for key, val in self.sources.items()},
-            "left" : self.left.to_dict(),
-            "right": self.right.to_dict(),
-            "height" : self.height,
-            "res" : self.total_res,
-            "cardinality" : self.cardinality,
-            "selectivity" : self.selectivity,
-            "cost" : self.cost
-        }
-
     def __str__(self):
-        return "({} {})".format(self.left, self.right)
-        #return "({}, {}, ({}, {}))".format(self.left, self.right, self.cardinality, self.cost)
+        if isinstance(self.operator, Xunion):
+            if not isinstance(self.left, IndependentOperator):
+                inner = " UNION ".join([str(subtree) for subtree in self.left])
+            else:
+                inner = str(self.left)
+            return "({})".format(inner)
+        elif isinstance(self.operator, Xnoptional) or isinstance(self.operator, Xgoptional):
+            return "({} OPT {})".format(self.left, self.right)
+        elif not self.right:
+            return "({})".format(self.left)
+        else:
+            return "({} AND {} {}-{})".format(self.left, self.right, self.operator, self.operator.id_operator)
+        #return "({}, {}, ({}, {}))".format(self.left_plan, self.right_plan, self.cardinality, self.cost)
 
     @property
     def is_triple_pattern(self):
@@ -92,34 +91,41 @@ class TreePlan(object):
             "p" : set(),
             "o" : set(),
         }
-        for key, value in self.right.variables_dict.items():
-            if value:
-                v_dict[key].update(value)
-        for key, value in self.left.variables_dict.items():
-            if value:
-                v_dict[key].update(value)
+        if isinstance(self.operator, Xunion):
+            for subtree in self.left:
+                for key, value in subtree.variables_dict.items():
+                    if value:
+                        v_dict[key].update(value)
+        else:
+            for key, value in self.right.variables_dict.items():
+                if value:
+                    v_dict[key].update(value)
+            for key, value in self.left.variables_dict.items():
+                if value:
+                    v_dict[key].update(value)
         return v_dict
 
     def compute_cardinality(self, card_est_model):
         if self.right:
             # If Join Operator
             self.cardinality = max(card_est_model.join_cardinality(self.left, self.right), 1.0)
+        elif isinstance(self.operator, Xunion):
+            self.cardinality = card_est_model.union_cardinality(self.left)
+            return self.cardinality
         else:
             # If Project Operator
             self.cardinality =  self.left.compute_cardinality(card_est_model)
-
         return self.cardinality
-
-    @property
-    def selectivity(self):
-        return min(self.right.selectivity, self.left.selectivity)
 
 
     def compute_cost(self, cost_model):
         treeplan_cost = cost_model[type(self.operator)]
 
-        if isinstance(self.operator, Xproject) or isinstance(self.operator, Xdistinct):
+        if isinstance(self.operator, Xproject) or isinstance(self.operator, Xdistinct) or isinstance(self.operator, Xlimit):
             self.cardinality = self.left.cardinality
+
+        elif isinstance(self.operator, Xunion):
+            self.cardinality = cost_model.cardinality_estimation.union_cardinality(self.left)
         else:
             if cost_model.switch and self in cost_model.switch: #and self.join_type >= 2:
                 self.cardinality = cost_model.cardinality_estimation.join_cardinality(self.left, self.right, func=cost_model.switch_function)
@@ -128,18 +134,18 @@ class TreePlan(object):
 
         cost_self = treeplan_cost(self.left, self.right)
 
-
         if isinstance(self.left, TreePlan):
             cost_self += self.left.cost
         if isinstance(self.right, TreePlan):
             cost_self += self.right.cost
-
 
         self.cost = cost_self
         return self.cost
 
     @property
     def join_type(self):
+        if not self.right:
+            return -1
 
         e1_vars = self.left.variables_dict
         e2_vars = self.right.variables_dict
@@ -156,15 +162,18 @@ class TreePlan(object):
     def execute(self, operators_input_queues,  eddies_queues, p_list, operators_desc):
 
         operator_inputs = operators_input_queues[self.operator.id_operator]
-        # Execute left sub-plan.
+        # Execute left_plan sub-plan.
         if self.left:
             # Case: Plan leaf (asynchronous).
             if self.left.__class__.__name__ == "IndependentOperator":
-                q = operators_desc[self.operator.id_operator][self.left.sources.keys()[0]]
-                p1 = Process(target=self.left.execute,
-                             args=(operators_input_queues[self.operator.id_operator][q], None, eddies_queues, p_list,))
-                p1.start()
-                p_list.put(p1.pid)
+                try:
+                    q = operators_desc[self.operator.id_operator][self.left.sources.keys()[0]]
+                    p1 = Process(target=self.left.execute,
+                                 args=(operators_input_queues[self.operator.id_operator][q], None, eddies_queues, p_list,))
+                    p1.start()
+                    p_list.put(p1.pid)
+                except Exception as e:
+                    raise e
 
             # Case: Tree plan.
             elif self.left.__class__.__name__ == "TreePlan":
@@ -174,17 +183,25 @@ class TreePlan(object):
                 p1.start()
                 p_list.put(p1.pid)
 
-            # Case: Array of independent operators.
+            # Case: Array of independent operators or Tree Plan.
             else:
                 for elem in self.left:
-                    q = operators_desc[self.operator.id_operator][elem.sources.keys()[0]]
-                    p1 = Process(target=elem.execute,
-                                 args=(operators_input_queues[self.operator.id_operator][q], None, eddies_queues, p_list,))
+                    if not isinstance(elem, TreePlan):
+                        q = operators_desc[self.operator.id_operator][elem.sources.keys()[0]]
+                        p1 = Process(target=elem.execute,
+                                     args=(operators_input_queues[self.operator.id_operator][q], None, eddies_queues,
+                                           p_list,))
+
+                    else:
+                        # q = operators_desc[self.operator.id_operator][elem.sources.keys()[0]]
+                        p1 = Process(target=elem.execute,
+                                     args=(operators_input_queues, eddies_queues, p_list, operators_desc,))
 
                     p1.start()
                     p_list.put(p1.pid)
 
-        # Execute right sub-plan.
+
+        # Execute right_plan sub-plan.
         if self.right and ((self.right.__class__.__name__ == "TreePlan") or (self.right.__class__.__name__ == "IndependentOperator")):
 
             # Case: Plan leaf (asynchronous).
@@ -192,25 +209,34 @@ class TreePlan(object):
                 q = operators_desc[self.operator.id_operator][self.right.sources.keys()[0]]
                 p2 = Process(target=self.right.execute,
                              args=(None, operators_input_queues[self.operator.id_operator][q], eddies_queues, p_list,))
+
             # Case: Tree plan.
             else:
                 p2 = Process(target=self.right.execute,
                              args=(operators_input_queues, eddies_queues, p_list, operators_desc,))
 
+
             p2.start()
             p_list.put(p2.pid)
-            #right = operators_input_queues[self.operator.id_operator]
+
+            # Pass the Process ID to Join operator if it is a Poly Join
+            if isinstance(self.operator, Poly_Fjoin):
+                self.operator.right_pid = p2.pid
+
+            #right_plan = operators_input_queues[self.operator.id_operator]
 
         # Right sub-plan. Case: Plan leaf (dependent).
         else:
         # TODO: Change this. Uncomment line below
-        #elif self.right:
+        #elif self.right_plan:
             operator_inputs = operator_inputs + [self.right]
-            #right = self.right
+            #print self.operator, operator_inputs
+            #right_plan = self.right_plan
 
         # Create a process for the operator node.
+
         self.p = Process(target=self.operator.execute,
-                         args=(operator_inputs, eddies_queues,))
+                         args=(operator_inputs, eddies_queues, p_list))
 
         self.p.start()
         p_list.put(self.p.pid)

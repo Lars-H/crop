@@ -1,0 +1,21 @@
+nLDE:
+  eddies: 2
+  timeout: 600
+
+operators:
+  poly_hash_join: False
+  hj_request_cost_factor: 1.0
+
+  bind_join_only: False
+  poly_bind_rule: 2
+  poly_bind_join: False
+
+crop:
+  optimizer: crop
+
+  height_discount: 4
+  cost_threshold: 0.3
+  robust_threshold: 0.05
+  k: 4
+  adaptive_k: True
+  top_t: 5

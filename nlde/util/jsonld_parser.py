@@ -1,58 +1,67 @@
 '''
-Created on 01.10.2018
+Created on Oct 2018
 
 @author: maribelacosta
+@author: Lars Heling
 '''
 
 
-def LDFParser(template, answers, var, queue, server, count, context):
+def parse_response(template, answers, var, queue, server, count, context, binding={}):
 
     card = 0
 
     if template == 4:
-        card = parseVarS(answers, var, queue, server, count, context)
+        card = parseVarS(answers, var, queue, server, count, context, binding)
     elif template == 2:
-        card = parseVarP(answers, var, queue, server, count, context)
+        card = parseVarP(answers, var, queue, server, count, context, binding)
     elif template == 1:
-        card = parseVarO(answers, var, queue, server, count, context)
+        card = parseVarO(answers, var, queue, server, count, context, binding)
     elif template == 6:
-        card = parseVarSP(answers, var, queue, server, count, context)
+        card = parseVarSP(answers, var, queue, server, count, context, binding)
     elif template == 5:
-        card = parseVarSO(answers, var, queue, server, count, context)
+        card = parseVarSO(answers, var, queue, server, count, context, binding)
     elif template == 3:
-        card = parseVarPO(answers, var, queue, server, count, context)
+        card = parseVarPO(answers, var, queue, server, count, context, binding)
     elif template == 0:
-        card = parseNoVar(answers, var, queue, server, count, context)
+        card = parseNoVar(answers, var, queue, server, count, context, binding)
 
     return card
 
 
-def parseNoVar(answers, var, queue, total, count, context):
-        queue.put({})
-        return 0
+def parseNoVar(answers, var, queue, server, count, context, binding={}):
+    card = 0
+    if var and isinstance(var, dict):
+        if len(var.get('s', [])) == 1:
+            return parseVarS(answers, var['s'], queue, server, count, context)
+        elif len(var.get('p', [])) == 1:
+            return parseVarP(answers, var['p'], queue, server, count, context)
+        elif len(var.get('o', [])) == 1:
+            return parseVarO(answers, var['o'], queue, server, count, context)
+    return card
 
-
-def parseVarS(answers, var, queue, server, count, context):
+def parseVarS(answers, var, queue, server, count, context, binding={}):
 
     card = 0
     for elem in answers:
-        if server not in str(elem) and "hydra" not in str(elem) and "variable" not in elem.keys():
+        if server not in str(elem) and "hydra:" not in str(elem) and "variable" not in elem.keys():
             pos = elem["@id"].find(":")
             prefix = elem["@id"][0:pos]
             if prefix in context.keys():
                 elem["@id"] = elem["@id"].replace(prefix+":", context[prefix])
             card = card + 1
-            queue.put({var[0]: elem["@id"]})
+            res = {var[0]: elem["@id"]}
+            res.update(binding)
+            queue.put(res)
 
     return card
             
-def parseVarP(answers, var, queue, server, count, context):
+def parseVarP(answers, var, queue, server, count, context, binding={}):
 
     card = 0
     to_process = {}
     for elem in answers:
 
-        if server not in str(elem) and "hydra" not in str(elem) and "variable" not in elem.keys():
+        if server not in str(elem) and "hydra:" not in str(elem) and "variable" not in elem.keys():
             to_process = elem
 
     if to_process == {}:
@@ -68,23 +77,25 @@ def parseVarP(answers, var, queue, server, count, context):
             if prefix in context.keys():
                 elem = elem.replace(prefix + ":", context[prefix])
         else:
-            prefix = p
+            prefix = elem #p
             if prefix == "@type":
-                p = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+                elem = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" # p = ...
             if "http" not in elem:
                 if prefix in context.keys():
                     elem = context[prefix]["@id"]
         card = card + 1
-        queue.put({var[0]: elem})
+        #queue.put({var[0]: elem})
+        res = {var[0]: elem}
+        res.update(binding)
+        queue.put(res)
 
     return card
 
-def parseVarO(answers, var, queue, server, count, context):
-
+def parseVarO(answers, var, queue, server, count, context, binding={}):
     card = 0
     to_process = {}
     for elem in answers:
-        if server not in str(elem) and "hydra" not in str(elem) and "variable" not in elem.keys():
+        if server not in str(elem) and "hydra:" not in str(elem) and "variable" not in elem.keys():
         #if "@graph" not in elem.keys() and "hydra" not in str(elem) and "void" not in str(elem) and "variable" not in str(elem) and "template" not in str(elem):
             to_process = elem
 
@@ -117,19 +128,32 @@ def parseVarO(answers, var, queue, server, count, context):
                 o = '"' + o + '"' + "^^" + "<" + elem["@type"] + ">"
 
         card = card + 1
-        queue.put({var[0]: o})
-   
+        #queue.put({var[0]: o})
+        res = {var[0]: o}
+        res.update(binding)
+        queue.put(res)
+
     elif not(isinstance(answers[p], list)):
         elem = answers[p]
         if isinstance(elem, int):
             elem = '"' + str(elem) + '"' + "^^" + "<http://www.w3.org/2001/XMLSchema#integer>"
+        elif isinstance(elem, float):
+            elem = elem
+        else:
+            if elem[0] != "<" and elem[-1] != ">" and ":" in elem:
+                splits = elem.split(":")
+                if len(splits) == 2 and splits[0] in context.keys():
+                    elem = "{}{}".format(context[splits[0]],splits[1])
         card = card + 1
-        queue.put({var[0]: elem})
+        #queue.put({var[0]: elem})
+        res = {var[0]: elem}
+        res.update(binding)
+        queue.put(res)
         return card
 
     else:
-        for elem in answers[p]:
 
+        for elem in answers[p]:
             if isinstance(elem, dict):
                 if "@id" in elem.keys():
                     o = elem["@id"]
@@ -155,22 +179,35 @@ def parseVarO(answers, var, queue, server, count, context):
 
                         o = '"' + o + '"' + "^^" + "<" + elem["@type"] + ">"
                 card = card + 1
-                queue.put({var[0]: o})
+                #queue.put({var[0]: o})
+                res = {var[0]: o}
+                res.update(binding)
+                queue.put(res)
 
             else:
                 if isinstance(elem, int):
                     elem = '"' + str(elem) + '"' + "^^" + "<http://www.w3.org/2001/XMLSchema#integer>"
+                elif isinstance(elem, float):
+                    elem = elem
+                else:
+                    if elem[0] != "<" and elem[-1] != ">" and ":" in elem:
+                        prefix, suffix = elem.split(":")
+                        if prefix in context.keys():
+                            elem = "{}{}".format(context[prefix], suffix)
                 card = card + 1
-                queue.put({var[0]: elem})
+                #queue.put({var[0]: elem})
+                res = {var[0]: elem}
+                res.update(binding)
+                queue.put(res)
 
     return card
 
 
-def parseVarSP(answers, var, queue, server, count, context):
+def parseVarSP(answers, var, queue, server, count, context, binding={}):
 
     card = 0
     for elem in answers:
-        if server not in str(elem) and "hydra" not in str(elem) and "variable" not in elem.keys():
+        if server not in str(elem) and "hydra:" not in str(elem) and "variable" not in elem.keys():
             s = elem["@id"]
             pos = s.find(":")
             prefix = s[0:pos]
@@ -193,17 +230,20 @@ def parseVarSP(answers, var, queue, server, count, context):
                         if prefix in context.keys():
                             p = context[prefix]["@id"]
                 card = card + 1
-                queue.put({var[0]: s, var[1]: p})
+                #queue.put({var[0]: s, var[1]: p})
+                res = {var[0]: s, var[1]: p}
+                res.update(binding)
+                queue.put(res)
 
     return card
 
 
 
-def parseVarSO(answers, var, queue, server, count, context):
+def parseVarSO(answers, var, queue, server, count, context, binding={}):
 
     card = 0
     for elem in answers:
-        if server not in str(elem) and "hydra" not in str(elem) and "variable" not in elem.keys():
+        if server not in str(elem) and "hydra:" not in str(elem) and "variable" not in elem.keys():
             s = elem["@id"]
             pos = s.find(":")
 
@@ -245,10 +285,15 @@ def parseVarSO(answers, var, queue, server, count, context):
                         o = '"' + o + '"' + "^^" + "<" + elem[p]["@type"] + ">"
                     elif isinstance(o, int):
                         o = '"' + str(o) + '"' + "^^" + "<http://www.w3.org/2001/XMLSchema#integer>"
+                    #else:
+                    #    o = '"{}"'.format(o)
 
                 card = card + 1
-                queue.put({var[0]: s, var[1]: o})
-                
+                #queue.put({var[0]: s, var[1]: o})
+                res = {var[0]: s, var[1]: o}
+                res.update(binding)
+                queue.put(res)
+
             elif isinstance(elem[p], list):
                 for oelem in elem[p]:
                     if isinstance(oelem, dict):
@@ -285,28 +330,37 @@ def parseVarSO(answers, var, queue, server, count, context):
                             elif isinstance(o, int):
                                 o = '"' + str(o) + '"' + "^^" + "<http://www.w3.org/2001/XMLSchema#integer>"
                         card = card + 1
-                        queue.put({var[0]: s, var[1]: o})
+                        #queue.put({var[0]: s, var[1]: o})
+                        res = {var[0]: s, var[1]: o}
+                        res.update(binding)
+                        queue.put(res)
 
                     else:
                         if isinstance(oelem, int):
                             oelem = '"' + str(oelem) + '"' + "^^" + "<http://www.w3.org/2001/XMLSchema#integer>"
                         card = card + 1
-                        queue.put({var[0]: s, var[1]: oelem})
+                        #queue.put({var[0]: s, var[1]: oelem})
+                        res = {var[0]: s, var[1]: oelem}
+                        res.update(binding)
+                        queue.put(res)
             
             else:
                 if isinstance(elem[p], int):
                     elem[p] = '"' + str(elem[p]) + '"' + "^^" + "<http://www.w3.org/2001/XMLSchema#integer>"
                 card = card + 1
-                queue.put({var[0]: s, var[1]: elem[p]})
+                #queue.put({var[0]: s, var[1]: elem[p]})
+                res = {var[0]: s, var[1]: elem[p]}
+                res.update(binding)
+                queue.put(res)
 
     return card
                     
                     
-def parseVarPO(answers, var, queue, server, count, context):
+def parseVarPO(answers, var, queue, server, count, context, binding={}):
 
     card = 0
     for elem in answers:
-        if server not in str(elem) and "hydra" not in str(elem) and "variable" not in elem.keys():
+        if server not in str(elem) and "hydra:" not in str(elem) and "variable" not in elem.keys():
 
             for p in elem.keys():
                 if p == "@id":
@@ -360,7 +414,10 @@ def parseVarPO(answers, var, queue, server, count, context):
                             o = '"' + str(o) + '"' + "^^" + "<http://www.w3.org/2001/XMLSchema#integer>"
 
                     card = card + 1
-                    queue.put({var[0]: p_expanded, var[1]: o})
+                    #queue.put({var[0]: p_expanded, var[1]: o})
+                    res = {var[0]: p_expanded, var[1]: o}
+                    res.update(binding)
+                    queue.put(res)
 
                 elif isinstance(elem[p], list):
                     for oelem in elem[p]:
@@ -386,15 +443,24 @@ def parseVarPO(answers, var, queue, server, count, context):
                                     o = '"' + str(o) + '"' + "^^" + "<http://www.w3.org/2001/XMLSchema#integer>"
 
                             card = card + 1
-                            queue.put({var[0]: p_expanded, var[1]: o})
+                            #queue.put({var[0]: p_expanded, var[1]: o})
+                            res = {var[0]: p_expanded, var[1]: o}
+                            res.update(binding)
+                            queue.put(res)
 
                         else:
                             card = card + 1
-                            queue.put({var[0]: p_expanded, var[1]: oelem})
+                            #queue.put({var[0]: p_expanded, var[1]: oelem})
+                            res = {var[0]: p_expanded, var[1]: oelem}
+                            res.update(binding)
+                            queue.put(res)
 
                 else:
                     card = card + 1
-                    queue.put({var[0]: p_expanded, var[1]: elem[p]})
+                    #queue.put({var[0]: p_expanded, var[1]: elem[p]})
+                    res = {var[0]: p_expanded, var[1]: elem[p]}
+                    res.update(binding)
+                    queue.put(res)
 
     return card
 
@@ -404,7 +470,4 @@ def isliteral(s):
     else:
         return False
 
-
-def replace_prefix(uri, prefix, path):
-    return "<" + uri.replace(prefix+":", path) + ">"
 

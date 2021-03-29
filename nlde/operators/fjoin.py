@@ -26,11 +26,6 @@ class Fjoin(object):
         self.vars = variables
         self.eof = Tuple("EOF", 0, 0, set(), self.id_operator)
         self.eddies = eddies
-        #if eddy:
-        #    self.eddy = eddy
-        #else:
-            #self.eddy = randint(1, self.eddies)
-
 
         self.eddy = randint(1, self.eddies)
         self.left = None
@@ -38,6 +33,8 @@ class Fjoin(object):
         self.qresults = None
         self.probing = Value('i', 1)
         self.independent_inputs = 2
+        self.produced_tuples = 0
+        self.requests = {}
 
     def to_dict(self):
         return {
@@ -57,27 +54,30 @@ class Fjoin(object):
     def symmetric():
         return True
 
-    def execute(self, inputs, out):
+    def execute(self, inputs, out, p_list=None):
 
         # Initialize input and output queues.
         self.left = inputs[0]
         self.right = inputs[1]
         self.qresults = out
 
+        self.left_empty = False
+        self.right_empty = False
         # Get the tuples from the input queues.
         while True:
 
             self.probing.value = 1
-            # Try to get and process tuple from left queue.
+            # Try to get and process tuple from left_plan queue.
             try:
                 tuple1 = self.left.get(False)
-                #print("{}: {}".format("Left", tuple1))
                 self.stage1(tuple1, self.left_table, self.right_table)
 
             except Empty:
-                # Empty: in tuple1 = self.left.get(False), when the queue is empty.
-                #logging.info("Eddy {} Operator {} left queue is empty".format(self.eddy ,self.id_operator))
-                self.probing.value = 0
+                # Empty: in tuple1 = self.left_plan.get(False), when the queue is empty.
+                #logging.info("Eddy {} Operator {} left_plan queue is empty".format(self.eddy ,self.id_operator))
+                self.right_empty = True
+                if self.right_empty:
+                    self.probing.value = 0
                 pass
             except TypeError:
                 # TypeError: in resource = resource + tuple[var], when the tuple is "EOF".
@@ -86,18 +86,17 @@ class Fjoin(object):
                 # IOError: when a tuple is received, but the alarm is fired.
                 pass
 
-            # Try to get and process tuple from right queue.
+            # Try to get and process tuple from right_plan queue.
             try:
                 tuple2 = self.right.get(False)
-                #print("{}: {}".format("Right", tuple2))
-                #self.probing.value = 1
                 self.stage1(tuple2, self.right_table, self.left_table)
-                #self.probing.value = 0
 
             except Empty:
-                # Empty: in tuple2 = self.right.get(False), when the queue is empty.
-                #logging.info("Eddy {} Operator {} right queue is empty".format(self.eddy ,self.id_operator))
-                self.probing.value = 0
+                # Empty: in tuple2 = self.right_plan.get(False), when the queue is empty.
+                #logging.info("Eddy {} Operator {} right_plan queue is empty".format(self.eddy ,self.id_operator))
+                self.right_empty = True
+                if self.left_empty:
+                    self.probing.value = 0
                 pass
             except TypeError:
                 # TypeError: in resource = resource + tuple[var], when the tuple is "EOF".
@@ -105,12 +104,25 @@ class Fjoin(object):
             except IOError:
                 # IOError: when a tuple is received, but the alarm is fired.
                 pass
+
+
+    def to_queue(self, res, source=None):
+        if res.data == "EOF":
+            res.requests.update(self.requests)
+            res.operator_stats.update({
+                self.id_operator: {
+                    "tuples_produced": self.produced_tuples
+                }
+            })
+        self.produced_tuples += 1
+        self.qresults[self.eddy].put(res)
+
 
     # Stage 1: While one of the sources is sending data.
     def stage1(self, tuple1, tuple_rjttable, other_rjttable):
 
 
-        # Get the value(s) of the join variable(s) in the tuple.
+        # Get the value(s) of the operator variable(s) in the tuple.
         resource = ''
         if tuple1.data != "EOF":
             for var in self.vars:
@@ -118,14 +130,9 @@ class Fjoin(object):
                     resource = resource + str(tuple1.data[var])
                     #print("{}: {}".format(self.id_operator, str(tuple1.data)))
                 except Exception as e:
-                    print(self.vars)
-                    print(var)
-                    print(tuple1.data)
-                    print(self.id_operator)
-                    print(tuple1.ready, tuple1.done, tuple1.sources, tuple1.from_operator, tuple1.to_operator)
-                    print(e)
                     raise e
         else:
+            self.requests.update(tuple1.requests)
             resource = "EOF"
 
         # Probe the tuple against its RJT table.
@@ -142,11 +149,11 @@ class Fjoin(object):
             tail = RJTTail(record, probe_ts)
             other_rjttable[resource] = tail
 
-    # Stage 2: Executed when one source becomes blocked.
+    # Stage 2: Executed when one sources becomes blocked.
     def stage2(self, signum, frame):
         pass
 
-    # Stage 3: Finalizes the join execution. It is fired when both sources has sent all the data.
+    # Stage 3: Finalizes the operator execution. It is fired when both sources has sent all the data.
     def stage3(self):
         return
 
@@ -176,11 +183,15 @@ class Fjoin(object):
                 sources = list(set(record.tuple.sources) | set(tuple1.sources))
 
                 # Create tuple.
-                res = Tuple(data, ready, done, sources, self.id_operator)
-
-                #print(ready, done)
+                if data == "EOF":
+                    # Requests of left and right requests
+                    self.requests.update(tuple1.requests)
+                    res = Tuple(data, ready, done, sources, self.id_operator)
+                else:
+                    res = Tuple(data, ready, done, sources, self.id_operator)
 
                 # Send tuple to eddy operators.
-                self.qresults[self.eddy].put(res)
+                self.to_queue(res)
+                #self.qresults[self.eddy].put(res)
 
         return probe_ts

@@ -1,0 +1,12 @@
+nLDE:
+  eddies: 2
+  timeout: 600
+
+operators:
+  poly_hash_join: True
+  hj_request_cost_factor: 1.0
+  hash_join_only: True
+
+
+crop:
+  optimizer: left-linear

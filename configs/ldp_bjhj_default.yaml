@@ -1,0 +1,15 @@
+nLDE:
+  eddies: 2
+  timeout: 600
+
+operators:
+  poly_hash_join: False
+  hj_request_cost_factor: 1.0
+
+  bind_join_only: False
+  poly_bind_rule: 2
+  poly_bind_join: False
+
+
+crop:
+  optimizer: left-linear

@@ -4,6 +4,7 @@ from nlde.operators.xnjoin import Xnjoin
 from nlde.operators.fjoin import Fjoin
 from nlde.operators.xproject import Xproject
 from nlde.operators.xdistinct import Xdistinct
+from nlde.operators.xunion import Xunion
 from crop.costmodel.cardinality_estimation import CardinalityEstimation
 
 class CropCostModel(object):
@@ -18,7 +19,8 @@ class CropCostModel(object):
             Xnjoin: self.nested_loop_join,
             Fjoin: self.hash_join,
             Xproject: self.project,
-            Xdistinct: self.distinct
+            Xdistinct: self.distinct,
+            Xunion: self.union
         }
 
         self.__shj_io_const = float(kwargs.get("shj_io",  0.001))
@@ -83,7 +85,7 @@ class CropCostModel(object):
             # Cost for requesting/querying the data
             request_cost = 0
 
-            # Cost for locally processing the join results
+            # Cost for locally processing the operator results
             io_cost = 0
 
             if isinstance(e1, IndependentOperator) or e1.is_triple_pattern:
@@ -116,7 +118,7 @@ class CropCostModel(object):
             # Cost for requesting/querying the data
             request_cost = 0
 
-            # Cost for locally processing the join results
+            # Cost for locally processing the operator results
             io_cost = 0
 
             # If it is at a leaf, then we have request cost
@@ -158,6 +160,22 @@ class CropCostModel(object):
             return e1_cost
         return f
 
+    @property
+    def union(self):
+        def f(e1, e2):
+            e1_cost = e1.compute_cost(self)
+            e2_cost = e2.compute_cost(self)
+            return e1_cost + e2_cost
+        return f
+
+    @property
+    def munion(self):
+        def f(subplans):
+            cost_sum = 0
+            for subplan in subplans:
+                cost_sum += subplan.compute_cost(self)
+            return cost_sum
+        return f
 
     def __getitem__(self, item):
         return self.__cost_functions[item]

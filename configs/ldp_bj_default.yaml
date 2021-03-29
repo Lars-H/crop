@@ -1,0 +1,11 @@
+nLDE:
+  eddies: 2
+  timeout: 600
+
+operators:
+  bind_join_only: True
+  poly_bind_rule: 2
+  poly_bind_join: False
+
+crop:
+  optimizer: left-linear

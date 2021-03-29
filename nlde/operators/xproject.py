@@ -22,7 +22,7 @@ class Xproject(object):
         self.right = None
         self.qresults = None
         self.eddies = eddies
-        self.eddy = randint(1, self.eddies)
+        self.eddy = 1 #randint(1, self.eddies)
         self.vars = []
         self.probing = Value('i', 1)
         self.wait = True
@@ -31,27 +31,28 @@ class Xproject(object):
         for arg in variables:
             self.vars.append(arg.value[1:])
 
+
+    def __str__(self):
+        return "Xproject"
+
+
     # Executes the Xproject.
-    def execute(self, inputs, out):
+    def execute(self, inputs, out, p_list=None):
         # Initialize input and output queues.
         self.left = inputs[0]
-        #self.right = Queue()
         self.qresults = out
-
         # Get the tuples (solution mappings) from the input queue.
         while True:
 
             try:
                 # Get tuple (with solution mapping).
-                self.probing.value = 1
                 tuple1 = self.left.get(self.wait)
-
                 # Perform projection in the solution mapping.
                 if tuple1.data != "EOF":
                     # Create solution mapping with the specified domain in self.vars.
                     res = {}
                     for var in self.vars:
-                        res.update({var: tuple1.data[var]})
+                        res.update({var: tuple1.data.get(var, 'null')})
                     tuple1.data = res
                 else:
                     self.wait = False
@@ -59,6 +60,5 @@ class Xproject(object):
                 # Put tuple with solution mapping to output queue.
                 tuple1.done = tuple1.done | pow (2, self.id_operator)
                 self.qresults[self.eddy].put(tuple1)
-
             except Empty:
                 self.probing.value = 0

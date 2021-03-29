@@ -4,25 +4,30 @@ Created on Mar 23, 2015
 @author: Maribel Acosta
 
 Updated on Mar 10, 2020
-@author: Anonymous
+@author: Lars Heling
 
 """
 from eddyoperator import EddyOperator
-from nlde.util.sparqlparser import parse
-from crop.query_plan_optimizer.idp_optimizer import IDP_Optimizer
-from multiprocessing import Process, Queue
+from nlde.query.sparql_parser import parse
+from nlde.operators.operatorstructures import Tuple
+from nlde.policy.nopolicy import NoPolicy
+from multiprocessing import Process, Queue, active_children
 from time import time
+import os, signal
+
+import logging
+logger = logging.getLogger("nlde_debug")
+
 
 class EddyNetwork(object):
     
     def __init__(self, **kwargs):
 
         self.query = kwargs.get("query", None)
-        self.policy = kwargs.get("policy")
-        self.source = kwargs.get("source", "")
+        self.policy = kwargs.get("policy", NoPolicy())
+        self.sources = kwargs.get("sources", "")
         self.n_eddy = kwargs.get("n_eddy", 2)
         self.explain = kwargs.get("explain", False)
-        self.optimization = kwargs.get("optimization", "CROP")
         self.eofs = 0
 
         self.independent_operators = []
@@ -38,58 +43,38 @@ class EddyNetwork(object):
         self.operators_desc = None
         self.sources_desc = None
         self.eofs_operators_desc = None
+        self.output_queue = None
 
-        # Inits for robustness experiments
-        # Cost Model, Optimization Time, Cheapest and Most Robust Plans
-        self.cost_model = kwargs.get("cost_model")
-        self.robust_model = kwargs.get("robust_model")
-
-
-        ## IDP Optimizer Setup
-        k = kwargs.get("k")
-        top_t = kwargs.get("top_t")
-        adaptive_k = kwargs.get("adaptive_k")
-        enable_robustplan = self.optimization == "CROP"
-        robustness_threshold = kwargs.get("robust_threshold")
-        cost_threshold = kwargs.get("cost_threshold")
-        self.idp_optimizer = IDP_Optimizer(eddies=self.n_eddy, source=self.source, cost_model=self.cost_model,
-                                            robust_model=self.robust_model, k=k, top_t=top_t, adaptive_k=adaptive_k,
-                                            enable_robustplan=enable_robustplan,
-                                            robustness_threshold=robustness_threshold, cost_threshold=cost_threshold)
-
+        self.optimizer = kwargs.get("optimizer")
 
         # Stats
         self.triple_pattern_cnt = -1
-
         self.p_list = Queue()
-        # If a Query plan is provided
-        self.queryplan = kwargs.get("queryplan", None)
+        self.reached_timeout = False
 
-        if self.queryplan is None and self.query is None:
-            raise ValueError("Missing Argument, either Query String or Query Plan")
-
-        self.plan = self.__get_query_plan()
-
+        self.plan = None
+        if self.query is None:
+            logger.debug("No query provided")
+        else:
+            self.plan = self.__get_query_plan()
 
 
     def __get_query_plan(self):
 
-        plan = None
-        if self.queryplan:
-            return self.queryplan
-        else:
-            # Parse SPARQL query.
-            queryparsed = parse(self.query)
-            self.triple_pattern_cnt = len(queryparsed.where.left.triple_patterns)
+        # Parse SPARQL query.
+        queryparsed = parse(self.query)
+        self.triple_pattern_cnt =  queryparsed.triple_pattern_count
 
-            # Start Timer
-            start = time()
-            # Create Plan using CROP Approach
-            plan = self.idp_optimizer.iterative_dynamic_programming1(queryparsed)
-            # Time the execution
-            self.optimization_time = time() - start
+        # Start Timer
+        start = time()
+        # Create Plan
+        plan = self.optimizer.create_plan(queryparsed)
 
-            return plan
+        # Time the execution
+        self.optimization_time = time() - start
+
+        logger.debug(plan)
+        return plan
 
     def execute_plan(self, outputqueue, plan):
 
@@ -104,7 +89,7 @@ class EddyNetwork(object):
         for i in range(0, self.n_eddy+1):
             self.eddies_queues.append(Queue())
 
-        # Create operators queues (left and right).
+        # Create operators queues (left_plan and right_plan).
         for op in plan.operators:
             self.operators_input_queues.update({op.id_operator: []})
             for i in range(0, op.independent_inputs):
@@ -121,4 +106,68 @@ class EddyNetwork(object):
         self.tree.execute(self.operators_input_queues, self.eddies_queues, self.p_list, self.operators_desc)
 
     def execute(self, outputqueue):
-        self.execute_plan(outputqueue, self.plan)
+
+        if not self.plan is None:
+            # If there are actually any sources to be contacted in the plan
+            if len(self.plan) > 0:
+                self.execute_plan(outputqueue, self.plan)
+            else:
+                # Otherwise, just send EOF tuple
+                eof_tuple = Tuple("EOF", None, None, None)
+
+                # One "EOF" per eddy expecetd
+                for _ in range(self.n_eddy):
+                    outputqueue.put(eof_tuple)
+        else:
+            raise Exception("No Query Physical Plan to execute")
+
+
+    def execute_standalone(self, plan):
+
+        self.output_queue = Queue()
+        self.plan = plan
+        self.execute_plan(self.output_queue, plan)
+        count = 0
+        operator_stats = {}
+        requests_per_subexpression = {}
+        # Handle the rest of the query answer.
+        while count < self.n_eddy:
+            try:
+                ri = self.output_queue.get(True)
+                if ri.data == "EOF":
+                    operator_stats.update(ri.operator_stats)
+                    requests_per_subexpression.update(ri.requests)
+                    count = count + 1
+                else:
+                    yield ri
+            except Exception as e:
+                break
+
+        self.plan.logical_plan_stats(operator_stats)
+        self.plan.execution_requests = sum(requests_per_subexpression.values())
+        self.stop_execution()
+
+
+
+    def stop_execution(self, sig=None, err=None):
+
+        # If a signal is sent, then we reached the timeout
+        if sig:
+            self.reached_timeout = True
+
+        # Finalize Execution and kill all processes
+        self.output_queue.close()
+        while not self.p_list.empty():
+            pid = self.p_list.get()
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError as e:
+                pass
+
+        for p in active_children():
+            try:
+                p.terminate()
+            except OSError as e:
+                pass
+        #import sys
+        #sys.exit(1)

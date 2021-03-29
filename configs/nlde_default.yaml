@@ -1,0 +1,10 @@
+nLDE:
+  eddies: 2
+  timeout: 600
+
+operators:
+  poly_hash_join: False
+  bind_join_only: False
+
+crop:
+  optimizer: nlde

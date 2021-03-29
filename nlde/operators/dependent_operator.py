@@ -1,8 +1,8 @@
 from multiprocessing import Process, Queue
-from nlde.engine.contactsource import contact_ldf_server, get_metadata_ldf
-#from nlde.engine.contactsource_fast import contact_ldf_server, get_metadata_ldf
+from  nlde.engine.contact_source import contact_source, contact_source_bindings
 from nlde.operators.operatorstructures import Tuple
-from nlde.util.querystructures import TriplePattern, Argument
+from nlde.query import TriplePattern, Argument
+from  time import time
 
 class DependentOperator(object):
     """
@@ -18,16 +18,14 @@ class DependentOperator(object):
             variables = []
 
         self.server = server
-        #self.q = Queue()
 
         if isinstance(sources, int):
             self.sources =  {sources: set([str(var)  for var in variables])}
         else:
             self.sources = sources
 
-        #self.sources_desc = {int(key): value for key, value in sources_desc.items()}
         self.sources_desc = sources_desc
-
+        self.source_id = sources
         self.server = server
         self.query = query
         self.vars = set(variables)
@@ -37,28 +35,12 @@ class DependentOperator(object):
         self.p = None
         self.cost = None
 
-    def to_dict(self):
-        return {
-            "type" : "DependentOperator",
-            "server" : self.server,
-            "sources" : { key : list(val) for key, val in self.sources.items()},
-            "query" : self.query.to_dict(),
-            "sources_desc" : self.sources_desc,
-            "variables" : list(self.vars),
-            "res" : self.total_res,
-            "cardinality": self.cardinality,
-            "selectivity": self.selectivity,
-            "cost" : self.cost
-        }
-
-
     def __str__(self):
-        return "Dependent: {} ({})".format(self.query, self.cardinality)
-
-
-    def aux(self, n):
-        return "Dependent: ", self.query
-
+        return "Dependent: {} ({} @ {})".format(self.query, self.cardinality, ",".join("({}: {})".format(source,
+                                                                                                       value) for
+                                                                                       source,
+                                                                                       value in
+                                                                                       self.query.sources.items() ))
 
     @property
     def variables_dict(self):
@@ -78,7 +60,58 @@ class DependentOperator(object):
         self.cost = cost_function(self)
         return self.cost
 
-    def execute(self, variables, instances, outputqueue, p_list=None):
+    def execute(self, variables, instances, outputqueue ,ldf_server=None, p_list=None):
+        #self.q = Queue()
+        # Make instances a list, if not yet
+        if not isinstance(instances, list):
+            instances = [instances]
+
+        # If pre-selection of ldf servers exists
+        if ldf_server:
+            ldf_servers = [ldf_server]
+        else:
+            ldf_servers = self.query.sources
+
+        # Create process to contact sources.
+        aux_queue = Queue()
+
+        # Multi-processed DO
+        #p = Process(target=contact_source_bindings, args=(ldf_servers, self.query, aux_queue, instances,
+        # list(variables)))
+        #if p_list:
+        #    p_list.put(p.pid)
+        # p.start()
+
+        contact_source_bindings(ldf_servers, self.query, aux_queue, instances, list(variables))
+
+
+        sources = self.sources.keys()
+
+
+        # Ready and done vectors.
+        ready = self.sources_desc[self.sources.keys()[0]]
+        done = 0
+
+        # Get answers from the sources.
+        data = aux_queue.get(True)
+        while data != "EOF":
+            # TODO: Check why this is needed.
+            #data.update(inst)
+
+            # Create tuple and put it in output queue.
+            outputqueue.put(Tuple(data, ready, done, sources))
+
+            # Get next answer.
+            data = aux_queue.get(True)
+
+        # Close the queue
+        aux_queue.close()
+        #p.terminate()
+        request_cnt = data.get("requests", 0)
+        outputqueue.put(Tuple("EOF", ready, done, sources, requests={self.source_id: request_cnt}))
+
+
+    def execute_old(self, variables, instances, outputqueue ,p_list=None):
         self.q = Queue()
         # Copy the query array and obtain variables.
         query = [self.query.subject.value, self.query.predicate.value, self.query.object.value]
@@ -95,44 +128,41 @@ class DependentOperator(object):
                 if query[j] == "?" + i:
                     query[j] = inst_aux
 
-
         tp = TriplePattern(Argument(query[0]), Argument(query[1]), Argument(query[2]))
-        if False and get_metadata_ldf(self.server, tp) == 0:
-            # Ready and done vectors.
-            ready = self.sources_desc[self.sources.keys()[0]]
-            done = 0
-            sources = self.sources.keys()
-            outputqueue.put(Tuple("EOF", ready, done, sources))
+        tp.sources = self.query.sources
 
-        else:
+        # We need to handle the case that all variables are instatiated
+        vars = None
+        if tp.variable_position == 0:
+            vars = self.query.variables_dict
 
-            # Create process to contact source.
-            aux_queue = Queue()
-            self.p = Process(target=contact_ldf_server, args=(self.server, tp, aux_queue,))
-            self.p.start()
-            sources = self.sources.keys()
+        # Create process to contact sources.
+        aux_queue = Queue()
+        self.p = Process(target=contact_source, args=(self.query.sources, tp, aux_queue, vars))
 
-            if p_list:
-                p_list.put(self.p.pid)
+        self.p.start()
+        sources = self.sources.keys()
 
-            # Ready and done vectors.
-            ready = self.sources_desc[self.sources.keys()[0]]
-            done = 0
+        if p_list:
+            p_list.put(self.p.pid)
 
-            # Get answers from the source.
+        # Ready and done vectors.
+        ready = self.sources_desc[self.sources.keys()[0]]
+        done = 0
+
+        # Get answers from the sources.
+        data = aux_queue.get(True)
+        while data != "EOF":
+            # TODO: Check why this is needed.
+            data.update(inst)
+
+            # Create tuple and put it in output queue.
+            outputqueue.put(Tuple(data, ready, done, sources))
+
+            # Get next answer.
             data = aux_queue.get(True)
-            while data != "EOF":
 
-                # TODO: Check why this is needed.
-                data.update(inst)
-
-                # Create tuple and put it in output queue.
-                outputqueue.put(Tuple(data, ready, done, sources))
-
-                # Get next answer.
-                data = aux_queue.get(True)
-
-            # Close the queue
-            aux_queue.close()
-            outputqueue.put(Tuple("EOF", ready, done, sources))
-            self.p.terminate()
+        # Close the queue
+        aux_queue.close()
+        self.p.terminate()
+        outputqueue.put(Tuple("EOF", ready, done, sources))

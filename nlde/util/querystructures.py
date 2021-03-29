@@ -1,3 +1,5 @@
+from urlparse import urlparse
+
 class Query(object):
     def __init__(self, prefixes, projection, where, distinct, order_by=[], limit="", offset=""):
         self.prefixes = prefixes
@@ -93,6 +95,7 @@ class TriplesBlock(object):
 
 
 class TriplePattern(object):
+
     def __init__(self, s, p, o, **kwargs):
 
         if isinstance(s, Argument):
@@ -111,11 +114,14 @@ class TriplePattern(object):
             self.object = Argument(o)
 
 
-        self.count = kwargs.get("count", 0)
+        self.count = kwargs.get("count", None)
         self.distinct_subjects = kwargs.get("subjects", None)
         self.distinct_predicates = kwargs.get("predicates", None)
         self.distinct_objects = kwargs.get("objects", None)
+        self.sources = kwargs.get("sources", {})
 
+        self.subject_auths = {}
+        self.object_auths = {}
         self.id = -1
 
     def __key(self):
@@ -143,6 +149,10 @@ class TriplePattern(object):
     @property
     def cardinality(self):
         return self.count
+
+    @cardinality.setter
+    def cardinality(self, cardinality):
+        self.count = cardinality
 
     @property
     def selectivity(self):
@@ -175,7 +185,7 @@ class TriplePattern(object):
         elif i == 1:
             return self.predicate
         elif i == 2:
-            return self.predicate
+            return self.object
         elif i == 3:
             return self.variables
         else:
@@ -220,6 +230,21 @@ class TriplePattern(object):
             positions = positions | 1
 
         return positions
+
+    @property
+    def variable_position(self):
+        positions = 0
+
+        if not self.subject.isconstant and self.subject.isvariable():
+            positions = positions | 4
+
+        if not self.predicate.isconstant and self.predicate.isvariable():
+            positions = positions | 2
+
+        if not self.object.isconstant and self.object.isvariable():
+            positions = positions | 1
+        return positions
+
 
 class Argument(object):
     def __init__(self, value, isconstant=False):

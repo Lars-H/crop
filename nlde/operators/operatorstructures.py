@@ -4,6 +4,8 @@ Created on Jul 10, 2011
 Implements the structures and functions used by the physical operators.
 
 @author: Maribel Acosta
+@author: Lars Heling
+
 """
 
 
@@ -16,13 +18,21 @@ class Tuple(object):
     sources (where the tuple came from).
     """
 
-    def __init__(self, data, ready, done, sources, from_operator=-1, to_operator=-1):
+    def __init__(self, data, ready, done, sources, from_operator=-1, to_operator=-1, requests={},
+                 operator_stats={}):
         self.data = data
         self.ready = ready
         self.done = done
         self.sources = sources
         self.from_operator = from_operator
         self.to_operator = to_operator
+
+        # Metadata for analytics
+        self.requests = requests
+        self.operator_stats = operator_stats
+
+        # TODO: Include the source it was produced at (include this also in the __hash__)
+        # This will make the Bag semantics for the Poly Joins possible
 
     def get_operators(self):
         int_type = self.ready - self.done
@@ -34,7 +44,50 @@ class Tuple(object):
         return res
 
     def __str__(self):
-        return str(self.data)
+        if self.data == "EOF":
+            return "{}; Operator Stats: {};  Requests: {}".format(self.data, self.operator_stats,
+                                                            sum(self.requests.values())                                                                         )
+        if isinstance(self.data, str):
+            return self.data
+        else:
+            sorted_mappings = dict(sorted(self.data.items()))
+            return str(sorted_mappings)
+
+    def __eq__(self, other):
+        return str(other) == self.data
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __repr__(self):
+        return str(self)
+
+    def __hash__(self):
+        return hash(str(self))
+
+    def __eq__(self,other):
+        return hash(self) == hash(other)
+
+
+class EOF(object):
+    """
+    A Tuple to indicate the EOF. Allows to provide some payload as a dict
+    """
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+    def __str__(self):
+        return str(self.__dict__)
+
+    def __eq__(self, other):
+        return other == "EOF"
+
+    def __ne__(self, other):
+        return not  self.__eq__(other)
+
+    def get(self, key, default=None):
+        return self.__dict__.get(key, default)
 
 
 class Record(object):
@@ -50,6 +103,11 @@ class Record(object):
         self.insert_ts = insert_ts
         self.flush_ts = flush_ts
         
+    def __str__(self):
+        return str(self.tuple)
+
+    def __repr__(self):
+        return str(self)
 
 class RJTTail(object):
     """
@@ -69,6 +127,14 @@ class RJTTail(object):
     def setRJTProbeTS(self, rjtProbeTS):
         self.rjtProbeTS = rjtProbeTS
 
+    def __str__(self):
+        return str(self.records)
+
+    def __repr__(self):
+        return str(self)
+
+    def __getitem__(self, item):
+        return self.records[item]
 
 def bitCount(int_type):
     """

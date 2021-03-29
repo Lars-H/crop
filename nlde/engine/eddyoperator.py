@@ -5,6 +5,7 @@ Created on Nov 23, 2011
 """
 from Queue import Empty
 import logging
+from nlde.operators.xlimit import Xlimit
 logging.basicConfig(level=logging.INFO)
 
 class EddyOperator(object):
@@ -16,7 +17,6 @@ class EddyOperator(object):
         self.routing_buffer = pool[id]
         self.operators_desc = operators_desc
         self.operators_input_queues = operators_input_queues
-        #self.operators_right_queues = operators_right_queues
         self.operators_vars = operators_vars
         self.outputqueue = outputqueue
         self.eofs = independent_sources
@@ -29,6 +29,9 @@ class EddyOperator(object):
         self.operators = operators
         self.end = False
         self.wait = True
+
+        self.requests = {}
+        self.operator_stats = {}
 
         # Build list of non-symmetric operators.
         for o in operators_sym.keys():
@@ -50,6 +53,11 @@ class EddyOperator(object):
                 tup = self.routing_buffer.get(self.wait)
                 # Get the operators that have not been executed yet.
                 operators = tup.get_operators()
+
+                if tup.data == "EOF":
+                    #print tup
+                    self.requests.update(tup.requests)
+                    self.operator_stats.update(tup.operator_stats)
 
                 # Case: Tuple has been processed by all operators.
                 if len(operators) == 0:
@@ -110,25 +118,42 @@ class EddyOperator(object):
                 # Last phase of execution.
                 #logging.info("Eddy " + str(self.id) + " trying to finalize" )
                 if self.finalize:
-
                     # Check if there exists a physical operator that is still working.
                     op_active = 0
                     in_empty = True
+                    limit_reached = False
                     for op in self.operators:
                         i = op.id_operator
                         for q in self.operators_input_queues[i]:
                             in_empty = in_empty & q.empty()
+
+                            #if not q.empty():
+                            #    print op.id_operator, self.operators_input_queues, q
+
                         #in_empty = in_empty & self.operators_left_queues[i].empty() & self.operators_right_queues[i].empty()
+                        if isinstance(op, Xlimit): # and op.done:
+                            # When limit is reached
+                            limit_reached = True
+
 
                     for op in self.operators:
                         #logging.info("Eddy " + str(self.id) + " operator " + str(op.id_operator) + " probing value: " + str(op.probing.value))
                         op_active = op_active | op.probing.value
 
+                        #print type(op), op.id_operator, op.probing.value, op_active, in_empty,
+                        # self.routing_buffer.empty()
                     #logging.info("Eddy " + str(self.id) + " operators empty? " + str(op_active))
 
                     # If all the the operators are finished and there are no tuples in the routing buffer,
                     # then finish.
                     if not(op_active) and in_empty and self.routing_buffer.empty() and not(self.end):
                         self.end = True
+                        self.eof.operator_stats = self.operator_stats
+                        self.eof.requests = self.requests
                         self.outputqueue.put(self.eof)
                         #logging.info("Eddy " + str(self.id) + " finalized!")
+                    elif limit_reached:
+                        # Finalize in case the limit is reached
+                        self.end = True
+                        self.eof.operator_stats = self.operator_stats
+                        self.outputqueue.put(self.eof)

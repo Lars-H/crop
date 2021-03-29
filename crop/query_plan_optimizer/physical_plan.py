@@ -1,19 +1,32 @@
 from nlde.operators.independent_operator import IndependentOperator
-from nlde.operators.dependent_operator import DependentOperator
 from nlde.planner.plan import Plan
-from nlde.engine.contactsource import get_metadata_ldf
+#from nlde.engine.contactsources import get_metadata_tpf
+from nlde.engine.contact_source import get_metadata
 from nlde.planner.tree_plan import TreePlan
-from nlde.util.querystructures import TriplePattern
+from nlde.query import TriplePattern, BGP
+from nlde.operators.xnoptional import Xnoptional
+from nlde.operators.xgoptional import Xgoptional
 from nlde.operators.fjoin import Fjoin
+from nlde.operators.polyfjoin import Poly_Fjoin
 from nlde.operators.xnjoin import Xnjoin
 from nlde.operators.xproject import Xproject
 from nlde.operators.xdistinct import Xdistinct
-import numpy as np
-from itertools import combinations, chain
+from nlde.operators.xunion import Xunion
+from nlde.operators.xlimit import Xlimit
+from nlde.operators.xfilter import Xfilter
+from nlde.operators.xorderby import Xorderby
+from nlde.operators.polyxnjoin import Poly_Xnjoin
+from nlde.operators.polybindjoin import Poly_Bind_Join
+from nlde.operators.dependent_operator import DependentOperator
+from crop.query_plan_optimizer.logical_plan import LogicalPlan, LogicalUnion
+
+# Logging
+import logging
+logger = logging.getLogger("nlde_debug")
 
 class PhysicalPlan(object):
 
-    def __init__(self, source, eddies, plan, query):
+    def __init__(self, source, eddies, logical_plan, query=None, poly_operator=True, **kwargs):
         self.source = source
 
         self.eddies = eddies
@@ -22,78 +35,87 @@ class PhysicalPlan(object):
         self.sources_desc = {}
         self.eofs_desc = {}
         self.dependent_sources = 0
-        self.independent_source = 0
+        self.independent_sources = 0
         self.operators_vars = {}
         self.operators = []
         self.operators_sym = {}
         self.sources = {}
         self.query = query
 
+        # Defines if polymorphism of operators is allowed
+        self.poly = poly_operator
+
+        self.poly_bind_join = kwargs.get("poly_bind_join", False)
+        self.poly_hash_join = kwargs.get("poly_hash_join", False)
+
+        self.hj_request_cost_factor = kwargs.get("hj_request_cost_factor", 1.0)
+        self.poly_bind_rule = kwargs.get("poly_bind_rule", 1)
+
+        # Federation Configs
+        self.sparql_limit = kwargs.get("sparql_limit", 500)
+        self.brtpf_mappings = kwargs.get("brtpf_mappings", 30)
+        self.sparql_mappings = kwargs.get("sparql_mappings", 50)
         # Maps each operator to the sources that pass through it
-        # Also indicating if it is the left (0) or right (1) input
+        # Also indicating if it is the left_plan (0) or right_plan (1) input
         self.operators_desc = {}
         self.plan_order = {}
         self.source_id = 0
 
-        # Maps source to an integer representing the operators it passes through
+        # Map operator ids to logical plan objects
+        self.operator_id2logical_plan = {}
+
+        # Requests stats
+        self.execution_requests = 0
+        self.planning_requests = 0
+
+        # Maps sources to an integer representing the operators it passes through
         self.source_by_operator = {}
 
-        # Store nodes in plan
-        self.nodes = set()
-
-        self.logical_plan = plan
-        tree = self.create_subplan_by_join(plan[0], plan[1], plan[2])
+        self.logical_plan = logical_plan
+        tree = self.from_logical_plan(logical_plan)
 
         self.sources_desc = self.source_by_operator
 
         # Adds the projection operator to the plan.
-        if self.query.projection:
-            op = Xproject(self.id_operator, query.projection, eddies)
-            self.operators.append(op)
-            tree = TreePlan(op,
-                            tree.vars, tree.join_vars, tree.sources, tree, None, tree.height + 1, tree.total_res)
-
-            # Update signature of tuples.
-            self.operators_sym.update({self.id_operator: False})
-            self.operators_desc[self.id_operator] = {}
-            for source in tree.sources:
-                self.operators_desc[self.id_operator].update({source: 0})
-                self.eofs_desc[source] = self.eofs_desc[source] | pow(2, self.id_operator)
-                self.sources_desc[source] = self.sources_desc[source] | pow(2, self.id_operator)
-            self.plan_order[self.id_operator] = tree.height
-            self.operators_vars[self.id_operator] = tree.vars
-            self.id_operator += 1
-
+        if self.query and self.query.projection:
+            tree = self.add_projection(tree)
 
         # Adds the distinct operator to the plan.
-        if query.distinct:
-            op = Xdistinct(self.id_operator, eddies)
-            self.operators.append(op)
-            tree = TreePlan(op, tree.vars, tree.join_vars, tree.sources,
-                            tree, None, tree.height + 1, tree.total_res)
+        if self.query and self.query.distinct:
+            tree = self.add_distinct(tree)
 
-            # Update signature of tuples.
-            self.operators_sym.update({self.id_operator: False})
-            self.operators_desc[self.id_operator] = {}
-            for source in tree.sources:
-                self.operators_desc[self.id_operator].update({source: 0})
-                self.eofs_desc[source] = self.eofs_desc[source] | pow(2, self.id_operator)
-                self.sources_desc[source] = self.sources_desc[source] | pow(2, self.id_operator)
-            self.plan_order[self.id_operator] = tree.height
-            self.operators_vars[self.id_operator] = tree.vars
-            self.id_operator += 1
+        # Adds the order by operator to the plan.
+        if self.query and len(self.query.order_by) > 0:
+            tree = self.add_order_by(tree)
+
+        # Adds the limit operator to the plan.
+        if self.query and int(self.query.limit) > 0:
+            tree = self.add_limit(tree)
 
         self.physical_plan = Plan(query_tree=tree, tree_height=tree.height,
                                   operators_desc=self.operators_desc, sources_desc=self.source_by_operator,
                                   plan_order=self.plan_order, operators_vars=self.operators_vars,
-                                  independent_sources=self.independent_source,
+                                  independent_sources=self.independent_sources,
                                   operators_sym=self.operators_sym, operators=self.operators)
 
         self.independent_sources = self.physical_plan.independent_sources
 
         self.__average_cost = None
         self.__cardinality = {}
+        self.__q_errors = {}
 
+
+    def cost(self, cost_model):
+        try:
+            return self.logical_plan.compute_cost(cost_model)
+        except:
+            return -1
+
+    def average_cost(self, cost_model):
+        try:
+            return self.logical_plan.average_cost(cost_model)
+        except:
+            return -1
 
     def __str__(self):
         return str(self.physical_plan.tree)
@@ -107,33 +129,6 @@ class PhysicalPlan(object):
     def __len__(self):
         # Number of sources (i.e., triple patterns)
         return self.independent_sources + self.dependent_sources
-
-    def cost(self, cost_model):
-        return self.physical_plan.tree.compute_cost(cost_model)
-
-    def average_cost(self, cost_model):
-
-        base_cost = self.cost(cost_model)
-        nodes_cost = [base_cost]
-        s = self.nodes
-        s = [n for n in self.nodes if n.join_type >= 2]
-        node_subsets = chain.from_iterable(combinations(s, r) for r in range(1, len(s) + 1))
-        for nodes in node_subsets:
-            if len(nodes) > 0:
-                cost_model.set_switch(nodes, lambda x,y: sum([x,y]))
-                nodes_cost.append(self.physical_plan.tree.compute_cost(cost_model))
-                cost_model.set_switch(nodes, lambda x,y: max(x, y))
-                nodes_cost.append(self.physical_plan.tree.compute_cost(cost_model))
-                cost_model.set_switch(nodes, lambda x,y: max(x / y, y / x))
-                nodes_cost.append(self.physical_plan.tree.compute_cost(cost_model))
-
-                cost_model.set_switch(None, None)
-                cost_model.set_function(None)
-
-        self.__average_cost = np.median(nodes_cost)
-        # Taking the max does seem to provide better results
-        self.physical_plan.robustness_val = self.__average_cost
-        return self.__average_cost
 
     def cardinality(self, cost_model):
         return self.physical_plan.tree.compute_cardinality(cost_model.cardinality_estimation)
@@ -149,6 +144,14 @@ class PhysicalPlan(object):
     @property
     def height(self):
         return self.maxDepth(self.tree)
+
+    @property
+    def total_requests(self):
+        return self.planning_requests + self.execution_requests
+
+    @property
+    def q_errors(self):
+        return self.__q_errors
 
     def maxDepth(self, node):
         if isinstance(node, IndependentOperator) or isinstance(node, DependentOperator) :
@@ -166,26 +169,104 @@ class PhysicalPlan(object):
             else:
                 return rDepth + 1
 
-    def join_subplans(self, left, right, join_type=None):
+    def traverse_tree(self, node):
 
-        # Get Metadata for join
+        # Traverse through branches recursively and create json-seriazable dict while doing so
+        branch = {}
+
+        if isinstance(node, IndependentOperator) or isinstance(node, DependentOperator):
+            branch['type'] = 'Leaf'
+            branch['tpf'] = str(node.query)
+            branch['cardinality'] = str(node.cardinality)
+            branch['source_id'] = node.source_id
+        else:
+            if isinstance(node.operator, Xnjoin) or isinstance(node.operator, Poly_Xnjoin) or isinstance(
+                    node.operator, Poly_Bind_Join):
+
+                # Get Produced Tuples
+                op_id = node.operator.id_operator
+                lp = self.operator_id2logical_plan.get(op_id, None)
+                true_tuples = lp.true_cardinality if lp else -1
+                estimated_tuples = lp.cardinality if lp else -1
+
+                branch['produced_tuples'] = true_tuples
+                branch['estimated_tuples'] = estimated_tuples
+                branch['type'] = 'NLJ'
+                branch['subtype'] = str(node.operator)
+                branch['operator_id'] = node.operator.id_operator
+                branch.update(lp.runtime_stats)
+                if node.right is not None:
+                    branch['right'] = self.traverse_tree(node.right)
+                if node.left is not None:
+                    branch['left'] = self.traverse_tree(node.left)
+
+            elif isinstance(node.operator, Fjoin) or  isinstance(node.operator, Poly_Fjoin):
+
+                # Get Produced Tuples
+                op_id = node.operator.id_operator
+                lp = self.operator_id2logical_plan.get(op_id, None)
+                true_tuples = lp.true_cardinality if lp else -1
+                estimated_tuples = lp.cardinality if lp else -1
+
+                branch['produced_tuples'] = true_tuples
+                branch['estimated_tuples'] = estimated_tuples
+                branch['type'] = 'SHJ'
+                branch['subtype'] = str(node.operator)
+                branch['operator_id'] = node.operator.id_operator
+                branch.update(lp.runtime_stats)
+                if node.right is not None:
+                    branch['right'] = self.traverse_tree(node.right)
+                if node.left is not None:
+                    branch['left'] = self.traverse_tree(node.left)
+            else:
+                return self.traverse_tree(node.left)
+        return branch
+
+    @property
+    def json_dict(self):
+        planDict = self.traverse_tree(self.tree)
+        return planDict
+
+
+    def logical_plan_stats(self, operator_dict):
+
+        for key, logical_plan in self.operator_id2logical_plan.items():
+            logical_plan.true_cardinality = operator_dict.get(key, {}).get("tuples_produced", -1)
+
+            if logical_plan.true_cardinality != 0 and logical_plan.cardinality != 0 :
+                q_error = max(float(logical_plan.true_cardinality) / float(logical_plan.cardinality), float(logical_plan.cardinality) / float(logical_plan.true_cardinality))
+            else:
+                q_error = "NaN"
+            self.__q_errors.setdefault(logical_plan.join_type, []).append(q_error)
+
+            logical_plan.runtime_stats = operator_dict.get(key, {})
+
+    def join_subplans(self, left, right, join_type=None, card=-1, logial_plan=None):
+
+        # Set Operator ID
+        if logial_plan:
+            self.operator_id2logical_plan[self.id_operator] = logial_plan
+            logial_plan.operator_id = self.id_operator
+
+        # Get Metadata for operator
         if isinstance(left, TriplePattern):
             # Get cardinality; Query only if necessary
-            left_card = left.count if left.count else get_metadata_ldf(self.source, left)
+            left_card = left.count if not left.count is None else get_metadata(self.source, left)
         else:
             left_card = left.total_res
 
         if isinstance(right, TriplePattern):
             # Get cardinality; Query only if necessary
-            right_card = right.count if right.count else get_metadata_ldf(self.source, right)
+            right_card = right.count if not right.count is None else get_metadata(self.source, right)
         else:
             right_card = right.total_res
 
         # Pre-decided Join Type
         if join_type:
-            xn_join = True if issubclass(join_type, Xnjoin) else False
-
-            if xn_join:
+            xn_join = True if (issubclass(join_type, Xnjoin) ) else False
+            xn_optional = issubclass(join_type, Xnoptional)
+            xg_optional = issubclass(join_type, Xgoptional)
+            if xn_join or xn_optional:
                 # Switch sides for NLJ
                 if left_card > right_card:
                     tmp = left
@@ -200,7 +281,16 @@ class PhysicalPlan(object):
             else:
                 xn_join = True if left_card <= right_card else False
 
+        # Joins Variable info
+        join_vars = set(left.variables).intersection(right.variables)
+        all_variables = set(left.variables).union(right.variables)
 
+
+
+        # If the subplans have no varibale in common,
+        # always place a Hash Join to handle the Cross-Product
+        if len(join_vars) == 0:
+            xn_join = False
 
         # Tree Plans as Leafs
         if isinstance(left, TreePlan):
@@ -219,67 +309,99 @@ class PhysicalPlan(object):
 
         if xn_join and isinstance(left, TreePlan) and isinstance(right, TreePlan):
             print("Invalid plan")
+        if xn_optional and isinstance(left, TreePlan) and isinstance(right, TreePlan):
+            print("Invalid plan")
 
         # Operator Leafs
-        if isinstance(left, TriplePattern):
+        if isinstance(left, TriplePattern) or isinstance(left, BGP):
 
             self.eofs_desc.update({self.source_id: 0})
             self.sources[self.source_id] = left.variables
             self.source_by_operator[self.source_id] = pow(2, self.id_operator)
+            self.eofs_desc[self.source_id] = pow(2, self.id_operator)
             self.operators_desc.setdefault(self.id_operator, {})[self.source_id] = 0
 
-            # Base on join, create operator
+            # Base on operator, create operator
             # If SHJ(FJ), use IO
-            # Or if it is a NLJ(XN) and left is a TP, then use IO
-            if (not xn_join) or (xn_join and isinstance(right, TriplePattern)):
+            # Or if it is a NLJ(XN) and left_plan is a TP, then use IO
+            if (not xn_join) or (xn_join and (isinstance(right, TriplePattern) or isinstance(right, BGP))):
                 leaf_left = IndependentOperator(self.source_id, self.source, left,
                                                 self.source_by_operator, left.variables, self.eddies,
-                                                self.source_by_operator)
-                self.independent_source += 1
+                                                self.source_by_operator, sparql_limit= self.sparql_limit)
+                self.independent_sources += 1
 
-            elif xn_join and isinstance(right, TreePlan):
+            elif (xn_join or xn_optional) and isinstance(right, TreePlan):
                 leaf_left = DependentOperator(self.source_id, self.source, left,
                                               self.source_by_operator, left.variables, self.source_by_operator)
                 self.dependent_sources += 1
 
+
             leaf_left.total_res = left_card
             self.source_id += 1
 
-        if isinstance(right, TriplePattern):
+        if isinstance(right, TriplePattern) or isinstance(right, BGP):
 
             self.eofs_desc.update({self.source_id: 0})
             self.sources[self.source_id] = right.variables
             self.source_by_operator[self.source_id] = pow(2, self.id_operator)
+            self.eofs_desc[self.source_id] = pow(2, self.id_operator)
             self.operators_desc.setdefault(self.id_operator, {})[self.source_id] = 1
 
-            # Base on join, create operator
-            if not xn_join:
-                leaf_right = IndependentOperator(self.source_id, self.source, right,
-                                                 self.source_by_operator, right.variables, self.eddies,
-                                                 self.source_by_operator)
-                self.independent_source += 1
-
-            else:
+            # Base on operator, create operator
+            if xn_join or xn_optional:
                 leaf_right = DependentOperator(self.source_id, self.source, right,
                                                self.source_by_operator, right.variables, self.source_by_operator)
                 self.dependent_sources += 1
 
+            else:
+                leaf_right = IndependentOperator(self.source_id, self.source, right,
+                                                 self.source_by_operator, right.variables, self.eddies,
+                                                 self.source_by_operator, sparql_limit=self.sparql_limit)
+                self.independent_sources += 1
 
             leaf_right.total_res = right_card
             self.source_id += 1
 
-        ## Create Joins
-        join_vars = set(left.variables).intersection(right.variables)
-        all_variables = set(left.variables).union(right.variables)
-
         self.operators_vars[self.id_operator] = join_vars
 
-        res = leaf_left.total_res + leaf_right.total_res
         self.plan_order[self.id_operator] = max(leaf_left.height, leaf_right.height)
 
         # Place Join
         if xn_join:  # NLJ
-            op = Xnjoin(self.id_operator, join_vars, self.eddies)
+            #if isinstance(left, TreePlan) and isinstance(right, TriplePattern) and self.poly: # First condition only
+            # needed for poly bind join
+            if (isinstance(right, TriplePattern) or isinstance(right, BGP)) and self.poly:
+                if self.poly_bind_join: # and leaf_left.height < 4: # To force not placing operator for example
+                    # Poly Bind Join Allows switching but not different "Source types"
+                    logger.debug("Placing Poly Bind Join")
+                    op = Poly_Bind_Join(self.id_operator, join_vars, self.eddies, left_card=card, switch_rule =
+                    self.poly_bind_rule, height=leaf_left.height)
+
+                else:
+                    # Poly Xn Join: Does not allow switching but adapts to source type
+                    logger.debug("Placing Poly XN Join")
+                    op = Poly_Xnjoin(self.id_operator, join_vars, self.eddies, brtpf_mappings=self.brtpf_mappings,
+                                     sparql_mappings=self.sparql_mappings)
+            else:
+                if self.poly_bind_join and self.poly:
+                    # Poly Bind Join Allows switching but not different "Source types"
+                    logger.debug("Placing Poly Bind Join")
+                    op = Poly_Bind_Join(self.id_operator, join_vars, self.eddies, left_card=card, switch_rule =
+                    self.poly_bind_rule, height=leaf_left.height)
+
+                elif self.poly:
+                    # Poly Xn Join: Does not allow switching but adapts to source type
+                    logger.debug("Placing Poly XN Join")
+                    op = Poly_Xnjoin(self.id_operator, join_vars, self.eddies, brtpf_mappings=self.brtpf_mappings,
+                                     sparql_mappings=self.sparql_mappings)
+                else:
+                    # Disabling the Adapting to source feature
+                    logger.debug("Placing XN Join: Right: {}, Poly: {}".format(right, self.poly))
+
+                    op = Poly_Xnjoin(self.id_operator, join_vars, self.eddies, brtpf_mappings=1, sparql_mappings=1)
+                    #op = Xnjoin(self.id_operator, join_vars, self.eddies)
+
+
             self.operators_sym.update({self.id_operator: True})
 
             # If Right side has to be DP
@@ -288,18 +410,53 @@ class PhysicalPlan(object):
                 tmp = leaf_right
                 leaf_right = leaf_left
                 leaf_left = tmp
+                op.left_est_card = right_card
 
                 # Update operators_descs for current operator id
                 for key, value in self.operators_desc[self.id_operator].items():
                     # Leaf Right is now the DP and needs to be input Right, i.e. 1
                     if key == leaf_right.sources.keys()[0]:
                         self.operators_desc[self.id_operator][key] = 1
-                    # All other will be on the left input
+                    # All other will be on the left_plan input
                     else:
                         self.operators_desc[self.id_operator][key] = 0
 
-        else:  # SHJ
-            op = Fjoin(self.id_operator, join_vars, self.eddies)
+        elif not xn_optional and not xg_optional:  # SHJ
+            #op = Fjoin(self.id_operator, join_vars, self.eddies)
+            if isinstance(left, TreePlan) and isinstance(right, TriplePattern) and self.poly and self.poly_hash_join:
+                logger.debug("Placing Poly Hash Join")
+                # Place Polymorphic Hash Join Operator
+                op = Poly_Fjoin(self.id_operator, join_vars, self.eddies, leaf_left, leaf_right,
+                                hj_request_cost_factor=self.hj_request_cost_factor)
+
+            # Switch Left and Right if: Left = Triple Pattern; Right = Tree Plan
+            elif isinstance(right, TreePlan) and isinstance(left, TriplePattern) and self.poly and self.poly_hash_join:
+                logger.debug("Placing Poly Hash Join (Inverse)")
+                # Place Polymorphic Hash Join Operator
+                op = Poly_Fjoin(self.id_operator, join_vars, self.eddies, leaf_right, leaf_right,
+                                hj_request_cost_factor=self.hj_request_cost_factor)
+
+                # Update operators_descs for current operator id
+                for key, value in self.operators_desc[self.id_operator].items():
+                    # Leaf Right is now the DP and needs to be input Right, i.e. 1
+                    if key == leaf_right.sources.keys()[0]:
+                        self.operators_desc[self.id_operator][key] = 1
+                    # All other will be on the left_plan input
+                    else:
+                        self.operators_desc[self.id_operator][key] = 0
+
+            else:
+                logger.debug("Placing Hash Join")
+                op = Fjoin(self.id_operator, join_vars, self.eddies)
+            self.operators_sym.update({self.id_operator: False})
+
+        elif not xg_optional: # XN Optional
+            op = Xnoptional(self.id_operator, left.variables, right.variables, self.eddies)
+            #op = Xnjoin(self.id_operator, join_vars, self.eddies)
+            self.operators_sym.update({self.id_operator: True})
+
+        else: # XG Optional
+            op = Xgoptional(self.id_operator, left.variables, right.variables, self.eddies)
             self.operators_sym.update({self.id_operator: False})
 
         # Add Operator
@@ -311,15 +468,185 @@ class PhysicalPlan(object):
         tree_sources = dict(leaf_left.sources)
         tree_sources.update(dict(leaf_right.sources))
         # Create Tree Plan
+        join_card = card
         tree_plan = TreePlan(op, all_variables, join_vars, tree_sources,
-                             leaf_left, leaf_right, tree_height, res)
+                             leaf_left, leaf_right, tree_height, join_card)
 
         if isinstance(op, Xnjoin) and isinstance(leaf_left, TreePlan) and isinstance(leaf_right, TreePlan):
             raise Exception
-        self.nodes.add(tree_plan)
 
         self.id_operator += 1
         return tree_plan
+
+
+    def union_subplans(self, plans):
+
+        op = Xunion(self.id_operator, self.eddies, inputs=len(plans))
+        self.operators.append(op)
+
+        union_vars = set()
+        height = 0
+        total_res = 0
+        for plan in plans:
+            union_vars.update(plan.variables)
+            height = max(height, plan.height)
+            total_res += plan.total_res
+        height += 1
+
+
+        tree_plan = TreePlan(op, union_vars, None, self.sources,
+                             plans, None, height, total_res)
+
+        # Update signature of tuples.
+        self.operators_sym.update({self.id_operator: False})
+        self.operators_desc[self.id_operator] = {}
+
+        for source in tree_plan.sources:
+            self.operators_desc[self.id_operator].update({source: 0})
+            self.eofs_desc[source] = self.eofs_desc[source] | pow(2, self.id_operator)
+            self.source_by_operator[source] = self.source_by_operator[source] | pow(2, self.id_operator)
+
+        self.plan_order[self.id_operator] = tree_plan.height
+        self.operators_vars[self.id_operator] = tree_plan.vars
+        self.id_operator += 1
+
+        return tree_plan
+
+
+    def filter_subplan(self, tree, fltr):
+
+        op = Xfilter(self.id_operator, self.eddies, filter=fltr)
+        self.operators.append(op)
+        tree = TreePlan(op,
+                        tree.vars, tree.join_vars, tree.sources, tree, None, tree.height + 1, tree.total_res)
+
+        # Update signature of tuples.
+        self.operators_sym.update({self.id_operator: False})
+        self.operators_desc[self.id_operator] = {}
+        for source in tree.sources:
+            self.operators_desc[self.id_operator].update({source: 0})
+            self.eofs_desc[source] = self.eofs_desc[source] | pow(2, self.id_operator)
+            self.source_by_operator[source] = self.source_by_operator[source] | pow(2, self.id_operator)
+
+        self.plan_order[self.id_operator] = tree.height
+        self.operators_vars[self.id_operator] = tree.vars
+        self.id_operator += 1
+        return tree
+
+
+    def create_triple_pattern_plan(self, triple_pattern):
+
+        self.eofs_desc.update({self.source_id: 0})
+        self.sources[self.source_id] = triple_pattern.variables
+        self.source_by_operator[self.source_id] = pow(2, self.id_operator)
+        self.operators_desc.setdefault(self.id_operator, {})[self.source_id] = 0
+
+        left = IndependentOperator(self.source_id, self.source, triple_pattern,
+                                   self.source_by_operator, triple_pattern.variables, self.eddies,
+                                   self.source_by_operator, sparql_limit=self.sparql_limit)
+        left.total_res = triple_pattern.cardinality
+
+
+        op = Xunion(self.id_operator, self.eddies, inputs=1)
+        self.operators.append(op)
+
+        # Update signature of tuples.
+        self.operators_sym.update({self.id_operator: False})
+        self.operators_desc[self.id_operator] = {}
+
+        source = self.source_id
+        self.operators_desc[self.id_operator].update({source: 0})
+
+        self.eofs_desc[source] = self.eofs_desc[source] | pow(2, self.id_operator)
+        self.source_by_operator[source] = self.source_by_operator[source] | pow(2, self.id_operator)
+
+        self.plan_order[self.id_operator] = 1
+        self.operators_vars[self.id_operator] = left.vars
+
+        tree_plan = TreePlan(op, left.vars, left.vars, self.sources,
+                             left, None, 1, left.total_res)
+
+        self.source_id += 1
+        self.independent_sources += 1
+        self.id_operator += 1
+        return tree_plan
+
+
+    def add_projection(self, tree):
+        op = Xproject(self.id_operator, self.query.projection, self.eddies)
+        self.operators.append(op)
+        tree = TreePlan(op,
+                        tree.vars, tree.join_vars, tree.sources, tree, None, tree.height + 1, tree.total_res)
+
+        # Update signature of tuples.
+        self.operators_sym.update({self.id_operator: False})
+        self.operators_desc[self.id_operator] = {}
+        for source in tree.sources:
+            self.operators_desc[self.id_operator].update({source: 0})
+            self.eofs_desc[source] = self.eofs_desc[source] | pow(2, self.id_operator)
+            self.sources_desc[source] = self.sources_desc[source] | pow(2, self.id_operator)
+        self.plan_order[self.id_operator] = tree.height
+        self.operators_vars[self.id_operator] = tree.vars
+        self.id_operator += 1
+        return tree
+
+
+    def add_distinct(self, tree):
+        op = Xdistinct(self.id_operator, self.eddies)
+        self.operators.append(op)
+        tree = TreePlan(op, tree.vars, tree.join_vars, tree.sources,
+                        tree, None, tree.height + 1, tree.total_res)
+
+        # Update signature of tuples.
+        self.operators_sym.update({self.id_operator: False})
+        self.operators_desc[self.id_operator] = {}
+        for source in tree.sources:
+            self.operators_desc[self.id_operator].update({source: 0})
+            self.eofs_desc[source] = self.eofs_desc[source] | pow(2, self.id_operator)
+            self.sources_desc[source] = self.sources_desc[source] | pow(2, self.id_operator)
+        self.plan_order[self.id_operator] = tree.height
+        self.operators_vars[self.id_operator] = tree.vars
+        self.id_operator += 1
+        return tree
+
+
+    def add_limit(self, tree):
+        op = Xlimit(self.id_operator, self.query.limit, self.query.offset, self.eddies)
+        self.operators.append(op)
+        tree = TreePlan(op,
+                        tree.vars, tree.join_vars, tree.sources, tree, None, tree.height + 1, tree.total_res)
+
+        # Update signature of tuples.
+        self.operators_sym.update({self.id_operator: False})
+        self.operators_desc[self.id_operator] = {}
+        for source in tree.sources:
+            self.operators_desc[self.id_operator].update({source: 0})
+            self.eofs_desc[source] = self.eofs_desc[source] | pow(2, self.id_operator)
+            self.sources_desc[source] = self.sources_desc[source] | pow(2, self.id_operator)
+        self.plan_order[self.id_operator] = tree.height
+        self.operators_vars[self.id_operator] = tree.vars
+        self.id_operator += 1
+        return tree
+
+
+    def add_order_by(self, tree):
+        op = Xorderby(self.id_operator, self.eddies, self.query.order_by)
+        self.operators.append(op)
+        tree = TreePlan(op, tree.vars, tree.join_vars, tree.sources,
+                        tree, None, tree.height + 1, tree.total_res)
+
+        # Update signature of tuples.
+        self.operators_sym.update({self.id_operator: False})
+        self.operators_desc[self.id_operator] = {}
+        for source in tree.sources:
+            self.operators_desc[self.id_operator].update({source: 0})
+            self.eofs_desc[source] = self.eofs_desc[source] | pow(2, self.id_operator)
+            self.sources_desc[source] = self.sources_desc[source] | pow(2, self.id_operator)
+        self.plan_order[self.id_operator] = tree.height
+        self.operators_vars[self.id_operator] = tree.vars
+        self.id_operator += 1
+        return tree
+
 
     def create_subplan(self, left, right):
 
@@ -346,3 +673,35 @@ class PhysicalPlan(object):
             return self.join_subplans(self.create_subplan_by_join(left[0], left[1], left[2]), right, join_type=join_type)
         else:
             return self.join_subplans(self.create_subplan_by_join(left[0], left[1], left[2]), self.create_subplan_by_join(right[0], right[1], right[2]), join_type=join_type)
+
+
+    def from_logical_plan(self, logical_plan):
+        if isinstance(logical_plan, LogicalPlan):
+            if len(logical_plan.filters) > 0:
+                return self.filter_subplan(self.from_logical_join(logical_plan[0], logical_plan[1], logical_plan[2]), logical_plan.filters[0])
+            else:
+                return self.from_logical_join(logical_plan[0], logical_plan[1], logical_plan[2],
+                                              logical_plan.cardinality, logial_plan=logical_plan)
+        elif isinstance(logical_plan, LogicalUnion):
+            subplans = []
+            for subplan in logical_plan.subplans:
+                subplans.append(self.from_logical_plan(subplan))
+            return self.union_subplans(subplans)
+
+    def from_logical_join(self, left, right, join_type, card=0, logial_plan=None):
+        if isinstance(left, TriplePattern) or isinstance(left, BGP):
+            return self.create_triple_pattern_plan(left)
+
+        elif left.is_triple_pattern and right.is_triple_pattern:
+            return self.join_subplans(left[0], right[0], join_type=join_type, card=card, logial_plan=logial_plan)
+
+        elif left.is_triple_pattern:
+            return self.join_subplans(left[0], self.from_logical_plan(right), join_type=join_type, card=card,
+                                      logial_plan=logial_plan)
+
+        elif right.is_triple_pattern:
+            return self.join_subplans(self.from_logical_plan(left), right[0], join_type=join_type, card=card,
+                                      logial_plan=logial_plan)
+        else:
+            return self.join_subplans(self.from_logical_plan(left), self.from_logical_plan(right),
+                                      join_type=join_type, card=card, logial_plan=logial_plan)

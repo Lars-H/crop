@@ -35,6 +35,8 @@ class Xnjoin(object):
         self.sources = None
         self.probing = Value('i', 1)
         self.independent_inputs = 1
+        self.produced_tuples = 0
+
 
     def to_dict(self):
         return {
@@ -52,7 +54,7 @@ class Xnjoin(object):
     def symmetric():
         return False
 
-    def execute(self, inputs, out):
+    def execute(self, inputs, out, p_list=None):
 
         # Executes the Xnjoin.
         self.left = inputs[0]
@@ -73,18 +75,29 @@ class Xnjoin(object):
         tuple1.ready = self.right.sources_desc[self.right.sources.keys()[0]] | tuple1.ready
         tuple1.sources = set(tuple1.sources) | set([self.right.sources.keys()[0]])
         tuple1.from_operator = self.id_operator
-        self.qresults[self.eddy].put(tuple1)
+        self.to_queue(tuple1)
         self.probing.value = 0
 
         # Finalize.
         self.stage3()
+
+
+    def to_queue(self, res, source=None):
+        if res.data == "EOF":
+            res.operator_stats.update({
+                self.id_operator: {
+                    "tuples_produced": self.produced_tuples
+                }
+            })
+        self.produced_tuples += 1
+        self.qresults[self.eddy].put(res)
 
     # Stage 1: While one of the sources is sending data.
     def stage1(self, tuple1, tuple_rjttable, other_rjttable):
 
         if tuple1.data != "EOF" and tuple1 != "EOF":
 
-            # Get the value(s) of the join variable(s) in the tuple.
+            # Get the value(s) of the operator variable(s) in the tuple.
             resource = ''
             for var in self.vars:
                 resource = resource + str(tuple1.data[var])
@@ -144,21 +157,22 @@ class Xnjoin(object):
                 res = Tuple(res, ready, done, sources, self.id_operator)
 
                 # Send solution mapping to eddy operators.
-                self.qresults[self.eddy].put(res)
+                self.to_queue(res)
+                #self.qresults[self.eddy].put(res)
 
-        # If the resource is not in the table, contact the source.
+        # If the resource is not in the table, contact the sources.
         else:
 
-            # Extract domain and range of join variables from the tuple.
+            # Extract domain and range of operator variables from the tuple.
             instances = {}
             for v in self.vars:
                 instances.update({v : tuple1.data[v]})
 
-            # Contact the source.
+            # Contact the sources.
             qright = Queue()
             self.right.execute(self.vars, instances, qright)
 
-            # Get the tuples from right queue.
+            # Get the tuples from right_plan queue.
             tuple2 = qright.get(True)
             self.sources = tuple2.sources
 
@@ -187,9 +201,10 @@ class Xnjoin(object):
                 res = Tuple(data, ready, done, sources, self.id_operator)
 
                 # Send tuple to eddy operators.
-                self.qresults[self.eddy].put(res)
+                self.to_queue(res)
+                #self.qresults[self.eddy].put(res)
 
-                # Introduce the results of contacting the source in the corresponding table.
+                # Introduce the results of contacting the sources in the corresponding table.
                 record = Record(tuple2, probe_ts, time(), float("inf"))
                 if resource in rjttable.keys():
                     rjttable.get(resource).updateRecords(record)
@@ -201,7 +216,7 @@ class Xnjoin(object):
                 # Get next solution.
                 tuple2 = qright.get(True)
 
-            # Close queue for this source.
+            # Close queue for this sources.
             qright.close()
 
         return probe_ts

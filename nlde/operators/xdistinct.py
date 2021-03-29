@@ -22,17 +22,28 @@ class Xdistinct(object):
         self.right = None
         self.qresults = None
         self.eddies = eddies
-        self.eddy = randint(1, self.eddies)
+        self.eddy = 1 #randint(1, self.eddies)
         self.bag = {}
         self.probing = Value('i', 1)
         self.wait = True
         self.independent_inputs = 1
+        self.produced_tuples = 0
+
+    def __str__(self):
+        return "XDistinct"
+
+    def to_queue(self, res, source=None):
+
+        if res.data == "EOF":
+            res.operator_stats.update({self.id_operator : {
+                "tuples_produced" : self.produced_tuples}})
+        self.produced_tuples += 1
+        self.qresults[self.eddy].put(res)
 
     # Executes the Xdistinct operator.
-    def execute(self, inputs, out):
+    def execute(self, inputs, out, p_list=None):
         # Initialize input and output queues.
         self.left = inputs[0]
-        #self.right = Queue()
         self.qresults = out
 
         # Get the tuples (solution mappings) from the input queue.
@@ -55,7 +66,7 @@ class Xdistinct(object):
                 if distinct:
                     tuple1.done = tuple1.done | pow(2, self.id_operator)
                     tuple1.from_operator = self.id_operator
-                    self.qresults[self.eddy].put(tuple1)
+                    self.to_queue(tuple1)
                     self.bag.update({str_tuple: False})
 
             except Empty:
