@@ -103,6 +103,9 @@ optional arguments:
                         (optional)
 ```
 
+## Supplemental Material
+
+The supplemental material including the experimental results and analyis are provided in the [CROP Analysis repository](https://github.com/Lars-H/crop_analysis). 
 
 ## How to Cite
 ```
